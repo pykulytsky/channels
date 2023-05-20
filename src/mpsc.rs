@@ -1,18 +1,19 @@
-use std::{
-    marker::PhantomData,
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
-    },
-    thread::{self, Thread},
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
-use crate::utils::queue::Queue;
+use crate::utils::{
+    queue::Queue,
+    wait::{wait, wake_one},
+};
 use crossbeam_epoch::pin;
 
+/// Field ready indicates wheater receiver need to block, in order to receive new message using
+/// `recv`.
 pub struct Channel<T> {
     queue: Queue<T>,
-    ready: AtomicBool,
+    messages: AtomicUsize,
     senders: AtomicUsize,
 }
 
@@ -20,7 +21,7 @@ impl<T> Channel<T> {
     pub fn new() -> Self {
         Self {
             queue: Queue::new(),
-            ready: AtomicBool::new(false),
+            messages: AtomicUsize::new(0),
             senders: AtomicUsize::new(0),
         }
     }
@@ -28,15 +29,14 @@ impl<T> Channel<T> {
 
 pub struct Sender<T> {
     channel: Arc<Channel<T>>,
-    target_thead: Thread,
 }
 
 impl<T> Sender<T> {
     pub fn send(&self, data: T) {
         let guard = &pin();
         self.channel.queue.push(data, &guard);
-        self.channel.ready.store(true, Ordering::Release);
-        self.target_thead.unpark();
+        self.channel.messages.fetch_add(1, Ordering::Release);
+        wake_one(&self.channel.messages);
     }
 }
 
@@ -45,7 +45,6 @@ impl<T> Clone for Sender<T> {
         self.channel.senders.fetch_add(1, Ordering::Release);
         Self {
             channel: self.channel.clone(),
-            target_thead: thread::current(),
         }
     }
 }
@@ -58,18 +57,38 @@ impl<T> std::ops::Drop for Sender<T> {
 
 pub struct Receiver<T> {
     channel: Arc<Channel<T>>,
-    _no_send: PhantomData<*const ()>,
 }
 
 impl<T> Receiver<T> {
     pub fn ready(&self) -> bool {
-        self.channel.ready.load(Ordering::Acquire)
+        if self.channel.messages.load(Ordering::Acquire) > 0 {
+            true
+        } else {
+            false
+        }
     }
 
     pub fn recv(&self) -> T {
         let guard = &pin();
-        while !self.channel.ready.swap(false, Ordering::Acquire) {
-            thread::park();
+        let mut messages = self.channel.messages.load(Ordering::Acquire);
+        loop {
+            if messages > 0 {
+                break loop {
+                    match self.channel.messages.compare_exchange(
+                        messages,
+                        messages - 1,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(v) => {
+                            messages = v;
+                        }
+                    }
+                };
+            } else {
+                wait(&self.channel.messages, messages);
+            }
         }
 
         self.channel.queue.try_pop(guard).unwrap()
@@ -81,11 +100,43 @@ impl<T> Receiver<T> {
     }
 }
 
-impl<T> Iterator for Receiver<T> {
-    type Item = T;
+pub struct IntoIter<T> {
+    rx: Receiver<T>,
+}
 
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
     fn next(&mut self) -> Option<Self::Item> {
-        None
+        self.rx.try_recv()
+    }
+}
+
+impl<T> IntoIterator for Receiver<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter { rx: self }
+    }
+}
+
+pub struct Iter<'a, T> {
+    rx: &'a Receiver<T>,
+}
+
+impl<T> Iterator for Iter<'_, T> {
+    type Item = T;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.rx.try_recv()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Receiver<T> {
+    type Item = T;
+    type IntoIter = Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Iter { rx: self }
     }
 }
 
@@ -95,11 +146,9 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     (
         Sender {
             channel: channel.clone(),
-            target_thead: thread::current(),
         },
         Receiver {
             channel: channel.clone(),
-            _no_send: PhantomData,
         },
     )
 }
@@ -107,6 +156,11 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering::SeqCst},
+        Barrier,
+    };
+    use std::thread;
 
     #[test]
     fn it_works() {
@@ -117,7 +171,45 @@ mod tests {
         assert!(rx.try_recv().is_none());
         tx.send(1);
         assert!(rx.try_recv().is_some());
+        assert!(rx.try_recv().is_none());
         let tx1 = tx.clone();
         tx1.send(1);
+    }
+
+    #[test]
+    fn recv_iter() {
+        let (tx, rx) = channel();
+        let counter = AtomicUsize::new(0);
+        let barrier = Barrier::new(2);
+        thread::scope(|s| {
+            s.spawn(|| {
+                barrier.wait();
+                for _ in rx {
+                    counter.fetch_add(1, SeqCst);
+                }
+            });
+            barrier.wait();
+            for i in 0..100 {
+                tx.send(i);
+            }
+        });
+
+        assert_eq!(counter.load(SeqCst), 100);
+    }
+
+    #[test]
+    fn recv_ready() {
+        let (tx, rx) = channel();
+        assert!(!rx.ready());
+        tx.send(1);
+        assert!(rx.ready());
+        assert_eq!(rx.channel.messages.load(SeqCst), 1);
+        tx.send(1);
+        assert_eq!(rx.channel.messages.load(SeqCst), 2);
+        rx.recv();
+        rx.recv();
+        assert!(!rx.ready());
+        assert!(rx.try_recv().is_none());
+        rx.recv();
     }
 }
