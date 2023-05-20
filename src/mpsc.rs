@@ -22,7 +22,7 @@ impl<T> Channel<T> {
         Self {
             queue: Queue::new(),
             messages: AtomicUsize::new(0),
-            senders: AtomicUsize::new(0),
+            senders: AtomicUsize::new(1),
         }
     }
 }
@@ -68,6 +68,10 @@ impl<T> Receiver<T> {
         }
     }
 
+    fn senders_remaining(&self) -> usize {
+        self.channel.senders.load(Ordering::Acquire)
+    }
+
     pub fn recv(&self) -> T {
         let guard = &pin();
         let mut messages = self.channel.messages.load(Ordering::Acquire);
@@ -95,6 +99,9 @@ impl<T> Receiver<T> {
     }
 
     pub fn try_recv(&self) -> Option<T> {
+        if self.senders_remaining() < 1 && self.channel.messages.load(Ordering::Acquire) < 1 {
+            return None;
+        }
         let guard = &pin();
         self.channel.queue.try_pop(guard)
     }
@@ -107,7 +114,10 @@ pub struct IntoIter<T> {
 impl<T> Iterator for IntoIter<T> {
     type Item = T;
     fn next(&mut self) -> Option<Self::Item> {
-        self.rx.try_recv()
+        if self.rx.senders_remaining() < 1 && self.rx.channel.messages.load(Ordering::Acquire) < 1 {
+            return None;
+        }
+        Some(self.rx.recv())
     }
 }
 
@@ -127,7 +137,10 @@ pub struct Iter<'a, T> {
 impl<T> Iterator for Iter<'_, T> {
     type Item = T;
     fn next(&mut self) -> Option<Self::Item> {
-        self.rx.try_recv()
+        if self.rx.senders_remaining() < 1 && self.rx.channel.messages.load(Ordering::Acquire) < 1 {
+            return None;
+        }
+        Some(self.rx.recv())
     }
 }
 
@@ -180,18 +193,17 @@ mod tests {
     fn recv_iter() {
         let (tx, rx) = channel();
         let counter = AtomicUsize::new(0);
-        let barrier = Barrier::new(2);
         thread::scope(|s| {
             s.spawn(|| {
-                barrier.wait();
-                for _ in rx {
+                for i in rx.into_iter() {
+                    println!("recv {i}");
                     counter.fetch_add(1, SeqCst);
                 }
             });
-            barrier.wait();
             for i in 0..100 {
                 tx.send(i);
             }
+            drop(tx);
         });
 
         assert_eq!(counter.load(SeqCst), 100);
@@ -210,6 +222,16 @@ mod tests {
         rx.recv();
         assert!(!rx.ready());
         assert!(rx.try_recv().is_none());
-        rx.recv();
+    }
+
+    #[test]
+    fn senders_count() {
+        let (tx, _) = channel::<i32>();
+        assert_eq!(tx.channel.senders.load(SeqCst), 1);
+        let _tx1 = tx.clone();
+        assert_eq!(tx.channel.senders.load(SeqCst), 2);
+        drop(_tx1);
+        assert_eq!(tx.channel.senders.load(SeqCst), 1);
+        drop(tx);
     }
 }
