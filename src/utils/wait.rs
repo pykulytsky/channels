@@ -6,7 +6,7 @@ compile_error!("Linux only");
 
 #[inline]
 pub unsafe fn syscall4(n: u32, arg1: *const AtomicUsize, arg2: usize, arg3: usize) -> usize {
-    let mut ret: usize;
+    let ret: usize;
     asm!(
         "syscall",
         inlateout("rax") n as usize => ret,
@@ -28,7 +28,7 @@ pub unsafe fn syscall5(
     arg3: usize,
     arg4: usize,
 ) -> usize {
-    let mut ret: usize;
+    let ret: usize;
     asm!(
         "syscall",
         inlateout("rax") n as usize => ret,

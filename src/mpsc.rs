@@ -66,22 +66,33 @@ pub struct Receiver<T> {
     channel: Arc<Channel<T>>,
 }
 
-impl<T> Receiver<T> {
-    #[inline]
-    pub fn ready(&self) -> bool {
-        self.channel.messages.load(Ordering::Acquire) > 0
-    }
+#[derive(Debug)]
+pub struct RecvError;
 
+impl<T> Receiver<T> {
     #[inline]
     fn senders_remaining(&self) -> usize {
         self.channel.senders.load(Ordering::Acquire)
     }
 
     #[inline]
-    pub fn recv(&self) -> T {
+    fn messages_remaining(&self) -> usize {
+        self.channel.messages.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn ready(&self) -> bool {
+        self.messages_remaining() > 0
+    }
+
+    #[inline]
+    pub fn recv(&self) -> Result<T, RecvError> {
         let guard = &pin();
-        let mut messages = self.channel.messages.load(Ordering::Acquire);
+        if self.messages_remaining() < 1 && self.senders_remaining() < 1 {
+            return Err(RecvError);
+        }
         loop {
+            let mut messages = self.channel.messages.load(Ordering::Acquire);
             if messages > 0 {
                 break loop {
                     match self.channel.messages.compare_exchange(
@@ -101,12 +112,12 @@ impl<T> Receiver<T> {
             }
         }
 
-        self.channel.queue.try_pop(guard).unwrap()
+        self.channel.queue.try_pop(guard).ok_or_else(|| RecvError)
     }
 
     #[inline]
     pub fn try_recv(&self) -> Option<T> {
-        if self.senders_remaining() < 1 && self.channel.messages.load(Ordering::Acquire) < 1 {
+        if self.senders_remaining() < 1 && self.messages_remaining() < 1 {
             return None;
         }
         let guard = &pin();
@@ -124,7 +135,7 @@ impl<T> Iterator for IntoIter<T> {
         if self.rx.senders_remaining() < 1 && self.rx.channel.messages.load(Ordering::Acquire) < 1 {
             return None;
         }
-        Some(self.rx.recv())
+        self.rx.recv().ok()
     }
 }
 
@@ -147,7 +158,7 @@ impl<T> Iterator for Iter<'_, T> {
         if self.rx.senders_remaining() < 1 && self.rx.channel.messages.load(Ordering::Acquire) < 1 {
             return None;
         }
-        Some(self.rx.recv())
+        self.rx.recv().ok()
     }
 }
 
@@ -182,7 +193,7 @@ mod tests {
         let (tx, rx) = channel();
         tx.send(1);
         assert!(rx.ready());
-        assert_eq!(rx.recv(), 1);
+        assert_eq!(rx.recv().unwrap(), 1);
         assert!(rx.try_recv().is_none());
         tx.send(1);
         assert!(rx.try_recv().is_some());
@@ -197,7 +208,8 @@ mod tests {
         let counter = AtomicUsize::new(0);
         thread::scope(|s| {
             s.spawn(|| {
-                for _ in rx.into_iter() {
+                for i in rx.into_iter() {
+                    println!("{i}");
                     counter.fetch_add(1, SeqCst);
                 }
             });
@@ -219,20 +231,21 @@ mod tests {
         assert_eq!(rx.channel.messages.load(SeqCst), 1);
         tx.send(1);
         assert_eq!(rx.channel.messages.load(SeqCst), 2);
-        rx.recv();
-        rx.recv();
+        let _ = rx.recv();
+        let _ = rx.recv();
         assert!(!rx.ready());
         assert!(rx.try_recv().is_none());
     }
 
     #[test]
     fn senders_count() {
-        let (tx, _) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
         assert_eq!(tx.channel.senders.load(SeqCst), 1);
         let _tx1 = tx.clone();
         assert_eq!(tx.channel.senders.load(SeqCst), 2);
         drop(_tx1);
         assert_eq!(tx.channel.senders.load(SeqCst), 1);
         drop(tx);
+        assert_eq!(rx.channel.senders.load(SeqCst), 0);
     }
 }
