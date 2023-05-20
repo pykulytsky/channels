@@ -18,20 +18,6 @@ impl<T> OneShot<T> {
             ready: AtomicBool::new(false),
         }
     }
-
-    pub fn split(self) -> (Sender<T>, Receiver<T>) {
-        let channel = Arc::new(self);
-        (
-            Sender {
-                channel: channel.clone(),
-                receiving_thread: thread::current(),
-            },
-            Receiver {
-                channel: channel.clone(),
-                _no_send: PhantomData,
-            },
-        )
-    }
 }
 
 impl<T> Drop for OneShot<T> {
@@ -82,7 +68,7 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
             receiving_thread: thread::current(),
         },
         Receiver {
-            channel: channel.clone(),
+            channel,
             _no_send: PhantomData,
         },
     )

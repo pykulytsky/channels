@@ -35,7 +35,7 @@ impl<T> Sender<T> {
     #[inline]
     pub fn send(&self, data: T) {
         let guard = &pin();
-        self.channel.queue.push(data, &guard);
+        self.channel.queue.push(data, guard);
         self.channel.messages.fetch_add(1, Ordering::Release);
         wake_one(&self.channel.messages);
     }
@@ -63,11 +63,7 @@ pub struct Receiver<T> {
 impl<T> Receiver<T> {
     #[inline]
     pub fn ready(&self) -> bool {
-        if self.channel.messages.load(Ordering::Acquire) > 0 {
-            true
-        } else {
-            false
-        }
+        self.channel.messages.load(Ordering::Acquire) > 0
     }
 
     #[inline]
@@ -165,9 +161,7 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
         Sender {
             channel: channel.clone(),
         },
-        Receiver {
-            channel: channel.clone(),
-        },
+        Receiver { channel },
     )
 }
 
@@ -187,7 +181,7 @@ mod tests {
         tx.send(1);
         assert!(rx.try_recv().is_some());
         assert!(rx.try_recv().is_none());
-        let tx1 = tx.clone();
+        let tx1 = tx;
         tx1.send(1);
     }
 
