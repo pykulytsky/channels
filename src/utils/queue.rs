@@ -6,12 +6,12 @@ use crossbeam_utils::CachePadded;
 use crossbeam_epoch::{unprotected, Atomic, Guard, Owned, Shared};
 
 #[derive(Debug)]
-pub(crate) struct Queue<T> {
+pub struct Queue<T> {
     head: CachePadded<Atomic<Node<T>>>,
     tail: CachePadded<Atomic<Node<T>>>,
 }
 
-struct Node<T> {
+pub struct Node<T> {
     /// The slot in which a value of type `T` can be stored.
     ///
     /// The type of `data` is `MaybeUninit<T>` because a `Node<T>` doesn't always contain a `T`.
@@ -175,7 +175,7 @@ impl<T> Queue<T> {
     ///
     /// Returns `None` if the queue is observed to be empty, or the head does not satisfy the given
     /// condition.
-    pub(crate) fn try_pop_if<F>(&self, condition: F, guard: &Guard) -> Option<T>
+    pub fn try_pop_if<F>(&self, condition: F, guard: &Guard) -> Option<T>
     where
         T: Sync,
         F: Fn(&T) -> bool,

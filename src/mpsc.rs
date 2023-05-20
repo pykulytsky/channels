@@ -27,6 +27,12 @@ impl<T> Channel<T> {
     }
 }
 
+impl<T> Default for Channel<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct Sender<T> {
     channel: Arc<Channel<T>>,
 }
@@ -155,7 +161,7 @@ impl<'a, T> IntoIterator for &'a Receiver<T> {
 }
 
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-    let channel = Arc::new(Channel::<T>::new());
+    let channel = Arc::new(Channel::<T>::default());
 
     (
         Sender {
