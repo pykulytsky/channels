@@ -32,6 +32,7 @@ pub struct Sender<T> {
 }
 
 impl<T> Sender<T> {
+    #[inline]
     pub fn send(&self, data: T) {
         let guard = &pin();
         self.channel.queue.push(data, &guard);
@@ -60,6 +61,7 @@ pub struct Receiver<T> {
 }
 
 impl<T> Receiver<T> {
+    #[inline]
     pub fn ready(&self) -> bool {
         if self.channel.messages.load(Ordering::Acquire) > 0 {
             true
@@ -68,10 +70,12 @@ impl<T> Receiver<T> {
         }
     }
 
+    #[inline]
     fn senders_remaining(&self) -> usize {
         self.channel.senders.load(Ordering::Acquire)
     }
 
+    #[inline]
     pub fn recv(&self) -> T {
         let guard = &pin();
         let mut messages = self.channel.messages.load(Ordering::Acquire);
@@ -98,6 +102,7 @@ impl<T> Receiver<T> {
         self.channel.queue.try_pop(guard).unwrap()
     }
 
+    #[inline]
     pub fn try_recv(&self) -> Option<T> {
         if self.senders_remaining() < 1 && self.channel.messages.load(Ordering::Acquire) < 1 {
             return None;
@@ -169,10 +174,7 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering::SeqCst},
-        Barrier,
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use std::thread;
 
     #[test]
@@ -195,8 +197,7 @@ mod tests {
         let counter = AtomicUsize::new(0);
         thread::scope(|s| {
             s.spawn(|| {
-                for i in rx.into_iter() {
-                    println!("recv {i}");
+                for _ in rx.into_iter() {
                     counter.fetch_add(1, SeqCst);
                 }
             });
