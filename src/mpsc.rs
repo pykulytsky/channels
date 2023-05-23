@@ -9,12 +9,9 @@ use crate::utils::{
 };
 use crossbeam_epoch::pin;
 
-/// Field ready indicates wheater receiver need to block, in order to receive new message using
-/// `recv`.
 pub struct Channel<T> {
     queue: Queue<T>,
     messages: AtomicUsize,
-    senders: AtomicUsize,
 }
 
 impl<T> Channel<T> {
@@ -22,7 +19,6 @@ impl<T> Channel<T> {
         Self {
             queue: Queue::new(),
             messages: AtomicUsize::new(0),
-            senders: AtomicUsize::new(1),
         }
     }
 }
@@ -49,16 +45,9 @@ impl<T> Sender<T> {
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        self.channel.senders.fetch_add(1, Ordering::Release);
         Self {
             channel: self.channel.clone(),
         }
-    }
-}
-
-impl<T> std::ops::Drop for Sender<T> {
-    fn drop(&mut self) {
-        self.channel.senders.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -70,9 +59,11 @@ pub struct Receiver<T> {
 pub struct RecvError;
 
 impl<T> Receiver<T> {
+    /// Returns the senders remaining of this [`Channel<T>`].
+    /// Since there is always 1 `Receiver<T>` holding the clone of `Channel<T>`, we substract 1.
     #[inline]
     fn senders_remaining(&self) -> usize {
-        self.channel.senders.load(Ordering::Acquire)
+        Arc::strong_count(&self.channel) - 1
     }
 
     #[inline]
@@ -240,12 +231,12 @@ mod tests {
     #[test]
     fn senders_count() {
         let (tx, rx) = channel::<i32>();
-        assert_eq!(tx.channel.senders.load(SeqCst), 1);
+        assert_eq!(rx.senders_remaining(), 1);
         let _tx1 = tx.clone();
-        assert_eq!(tx.channel.senders.load(SeqCst), 2);
+        assert_eq!(rx.senders_remaining(), 2);
         drop(_tx1);
-        assert_eq!(tx.channel.senders.load(SeqCst), 1);
+        assert_eq!(rx.senders_remaining(), 1);
         drop(tx);
-        assert_eq!(rx.channel.senders.load(SeqCst), 0);
+        assert_eq!(rx.senders_remaining(), 0);
     }
 }
